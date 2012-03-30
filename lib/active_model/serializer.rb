@@ -77,6 +77,10 @@ module ActiveModel
         array
       end
     end
+    
+    def to_xml(*args)
+      serializable_array.map(&:serializable_hash).to_xml(*args)
+    end
   end
 
   # Active Model Serializer
@@ -402,6 +406,10 @@ module ActiveModel
       else
         serializable_hash
       end
+    end
+    
+    def to_xml(*args)
+      serializable_hash.to_xml(*args)
     end
 
     # Returns a hash representation of the serializable
