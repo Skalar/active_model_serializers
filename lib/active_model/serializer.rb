@@ -408,8 +408,8 @@ module ActiveModel
       end
     end
     
-    def to_xml(*args)
-      serializable_hash.to_xml(*args)
+    def to_xml(options={})
+      serializable_hash.to_xml({ root: @options.fetch(:root, _root) }.merge options)
     end
 
     # Returns a hash representation of the serializable
