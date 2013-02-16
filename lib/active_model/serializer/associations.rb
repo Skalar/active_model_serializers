@@ -122,7 +122,7 @@ module ActiveModel
           # return collection.ids if collection.respond_to?(:ids)
           ids_key = "#{key.to_s.singularize}_ids"
 
-          if !option(:include) && source_serializer.object.respond_to?(ids_key)
+          if !(option(:include) || embed_ids_old_style) && source_serializer.object.respond_to?(ids_key)
             source_serializer.object.send(ids_key)
           else
             associated_object.map do |item|
