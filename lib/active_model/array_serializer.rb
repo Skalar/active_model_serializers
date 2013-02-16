@@ -63,6 +63,9 @@ module ActiveModel
         array
       end
     end
-  end
 
+    def to_xml(*args)
+      serializable_array.map(&:serializable_hash).to_xml(*args)
+    end
+  end
 end
