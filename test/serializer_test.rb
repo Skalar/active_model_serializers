@@ -1,97 +1,10 @@
 require "test_helper"
+require "test_fakes"
 
 class SerializerTest < ActiveModel::TestCase
-  class Model
-    def initialize(hash={})
-      @attributes = hash
-    end
-
-    def read_attribute_for_serialization(name)
-      @attributes[name]
-    end
-
-    def as_json(*)
-      { :model => "Model" }
-    end
-  end
-
-  class User
-    include ActiveModel::SerializerSupport
-
-    attr_accessor :superuser
-
-    def initialize(hash={})
-      @attributes = hash.merge(:first_name => "Jose", :last_name => "Valim", :password => "oh noes yugive my password")
-    end
-
-    def read_attribute_for_serialization(name)
-      @attributes[name]
-    end
-
-    def super_user?
-      @superuser
-    end
-  end
-
-  class Post < Model
-    def initialize(attributes)
-      super(attributes)
-      self.comments ||= []
-      self.author = nil
-    end
-
-    attr_accessor :comments, :author
-    def active_model_serializer; PostSerializer; end
-  end
-
-  class Comment < Model
-    def active_model_serializer; CommentSerializer; end
-  end
-
-  class UserSerializer < ActiveModel::Serializer
-    attributes :first_name, :last_name
-
-    def serializable_hash
-      attributes.merge(:ok => true).merge(options[:scope])
-    end
-  end
-
-  class DefaultUserSerializer < ActiveModel::Serializer
-    attributes :first_name, :last_name
-  end
-
-  class MyUserSerializer < ActiveModel::Serializer
-    attributes :first_name, :last_name
-
-    def serializable_hash
-      hash = attributes
-      hash = hash.merge(:super_user => true) if my_user.super_user?
-      hash
-    end
-  end
-
-  class CommentSerializer
-    def initialize(comment, scope, options={})
-      @comment, @scope = comment, scope
-    end
-
-    def serializable_hash
-      { :title => @comment.read_attribute_for_serialization(:title) }
-    end
-
-    def as_json(options=nil)
-      options ||= {}
-      if options[:root] == false
-        serializable_hash
-      else
-        { :comment => serializable_hash }
-      end
-    end
-  end
-
-  class PostSerializer < ActiveModel::Serializer
-    attributes :title, :body
-    has_many :comments, :serializer => CommentSerializer
+  def test_scope_works_correct
+    serializer = ActiveModel::Serializer.new :foo, :scope => :bar
+    assert_equal serializer.scope, :bar
   end
 
   def test_attributes
@@ -116,6 +29,17 @@ class SerializerTest < ActiveModel::TestCase
     }, hash)
   end
 
+  def test_attribute_method_with_name_as_serializer_prefix
+    object = SomeObject.new("something")
+    object_serializer = SomeSerializer.new(object, {})
+
+    hash = object_serializer.as_json
+
+    assert_equal({
+      :some => { :some => "something" }
+    }, hash)
+  end
+
   def test_serializer_receives_scope
     user = User.new
     user_serializer = UserSerializer.new(user, :scope => {:scope => true})
@@ -130,6 +54,18 @@ class SerializerTest < ActiveModel::TestCase
         :scope => true
       }
     }, hash)
+  end
+
+  def test_serializer_receives_url_options
+    user = User.new
+    user_serializer = UserSerializer.new(user, :url_options => { :host => "test.local" })
+    assert_equal({ :host => "test.local" }, user_serializer.url_options)
+  end
+
+  def test_serializer_returns_empty_hash_without_url_options
+    user = User.new
+    user_serializer = UserSerializer.new(user)
+    assert_equal({}, user_serializer.url_options)
   end
 
   def test_pretty_accessors
@@ -167,16 +103,78 @@ class SerializerTest < ActiveModel::TestCase
     }, post_serializer.as_json)
   end
 
-  class Blog < Model
-    attr_accessor :author
+  def test_conditionally_included_associations
+    user = User.new
+
+    post = Post.new(:title => "New Post", :body => "Body of new post", :email => "tenderlove@tenderlove.com")
+    comments = [Comment.new(:title => "Comment1"), Comment.new(:title => "Comment2")]
+    post.comments = comments
+
+    post_serializer = PostWithConditionalCommentsSerializer.new(post, :scope => user)
+
+    # comments enabled
+    post.comments_disabled = false
+    assert_equal({
+      :post => {
+        :title => "New Post",
+        :body => "Body of new post",
+        :comments => [
+          { :title => "Comment1" },
+          { :title => "Comment2" }
+        ]
+      }
+    }, post_serializer.as_json)
+
+    # comments disabled
+    post.comments_disabled = true
+    assert_equal({
+      :post => {
+        :title => "New Post",
+        :body => "Body of new post"
+      }
+    }, post_serializer.as_json)
   end
 
-  class AuthorSerializer < ActiveModel::Serializer
-    attributes :first_name, :last_name
-  end
+  def test_conditionally_included_associations_and_attributes
+    user = User.new
 
-  class BlogSerializer < ActiveModel::Serializer
-    has_one :author, :serializer => AuthorSerializer
+    post = Post.new(:title => "New Post", :body => "Body of new post", :author => 'Sausage King', :email => "tenderlove@tenderlove.com")
+    comments = [Comment.new(:title => "Comment1"), Comment.new(:title => "Comment2")]
+    post.comments = comments
+
+    post_serializer = PostWithMultipleConditionalsSerializer.new(post, :scope => user)
+
+    # comments enabled
+    post.comments_disabled = false
+    assert_equal({
+      :post => {
+        :title => "New Post",
+        :body => "Body of new post",
+        :comments => [
+          { :title => "Comment1" },
+          { :title => "Comment2" }
+        ]
+      }
+    }, post_serializer.as_json)
+
+    # comments disabled
+    post.comments_disabled = true
+    assert_equal({
+      :post => {
+        :title => "New Post",
+        :body => "Body of new post"
+      }
+    }, post_serializer.as_json)
+
+    # superuser - should see author
+    user.superuser = true
+    assert_equal({
+      :post => {
+        :title => "New Post",
+        :body => "Body of new post",
+        :author => "Sausage King"
+      }
+    }, post_serializer.as_json)
   end
 
   def test_has_one
@@ -264,7 +262,12 @@ class SerializerTest < ActiveModel::TestCase
       root false
     end
 
+    another_serializer = Class.new(BlogSerializer) do
+      self.root = false
+    end
+
     assert_equal({ :author => nil }, serializer.new(blog, :scope => user).as_json)
+    assert_equal({ :author => nil }, another_serializer.new(blog, :scope => user).as_json)
 
     # test inherited false root
     serializer = Class.new(serializer)
@@ -289,8 +292,8 @@ class SerializerTest < ActiveModel::TestCase
       :post => {
         :title => "New Post",
         :body => "Body of new post",
-        :comments => [1, 2],
-        :author => nil
+        :comment_ids => [1, 2],
+        :author_id => nil
       }
     }, serializer.as_json)
   end
@@ -313,8 +316,8 @@ class SerializerTest < ActiveModel::TestCase
       :post => {
         :title => "New Post",
         :body => "Body of new post",
-        :comments => [1, 2],
-        :author => nil
+        :comment_ids => [1, 2],
+        :author_id => nil
       },
       :comments => [
         { :title => "Comment1" },
@@ -331,8 +334,8 @@ class SerializerTest < ActiveModel::TestCase
       :post => {
         :title => "New Post",
         :body => "Body of new post",
-        :comments => [1, 2],
-        :author => 1
+        :comment_ids => [1, 2],
+        :author_id => 1
       },
       :comments => [
         { :title => "Comment1" },
@@ -369,57 +372,25 @@ class SerializerTest < ActiveModel::TestCase
     }, serializer.as_json)
   end
 
-  def test_array_serializer
-    model    = Model.new
-    user     = User.new
-    comments = Comment.new(:title => "Comment1", :id => 1)
+  def test_sets_can_be_serialized
+    post1 = Post.new(:title => "Post1", :author => "Author1", :id => 1)
+    post2 = Post.new(:title => "Post2", :author => "Author2", :id => 2)
 
-    array = [model, user, comments]
-    serializer = array.active_model_serializer.new(array, {:scope => true})
-    assert_equal([
-      { :model => "Model" },
-      { :user => { :last_name=>"Valim", :ok=>true, :first_name=>"Jose", :scope => true } },
-      { :comment => { :title => "Comment1" } }
-    ], serializer.as_json)
-  end
+    set = Set.new
+    set << post1
+    set << post2
 
-  def test_array_serializer
-    comment1 = Comment.new(:title => "Comment1", :id => 1)
-    comment2 = Comment.new(:title => "Comment2", :id => 2)
+    serializer = set.active_model_serializer.new set, :each_serializer => CustomPostSerializer
 
-    array = [ comment1, comment2 ]
-
-    serializer = array.active_model_serializer.new(array, :root => :comments)
-
-    assert_equal({ :comments => [
-      { :title => "Comment1" },
-      { :title => "Comment2" }
-    ]}, serializer.as_json)
-  end
-
-  def test_array_serializer_on_poros
-    name1 = "John Doe"
-    name2 = "Jane Roe"
-
-    array = [ name1, name2 ]
-
-    serializer = array.active_model_serializer.new(array)
-
-    assert_equal([ "\"John Doe\"", "\"Jane Roe\"" ], serializer.as_json)
-  end
-
-  class CustomBlog < Blog
-    attr_accessor :public_posts, :public_user
-  end
-
-  class CustomBlogSerializer < ActiveModel::Serializer
-    has_many :public_posts, :key => :posts, :serializer => PostSerializer
-    has_one :public_user, :key => :user, :serializer => UserSerializer
+    as_json = serializer.as_json
+    assert_equal 2, as_json.size
+    assert as_json.include?({ :title => "Post1" })
+    assert as_json.include?({ :title => "Post2" })
   end
 
   def test_associations_with_as
     posts = [
-      Post.new(:title => 'First Post', :body => 'text'), 
+      Post.new(:title => 'First Post', :body => 'text'),
       Post.new(:title => 'Second Post', :body => 'text')
     ]
     user = User.new
@@ -437,15 +408,15 @@ class SerializerTest < ActiveModel::TestCase
           {:title => 'Second Post', :body => 'text', :comments => []}
         ],
         :user => {
-          :first_name => "Jose", 
-          :last_name => "Valim", :ok => true, 
+          :first_name => "Jose",
+          :last_name => "Valim", :ok => true,
           :scope => true
         }
       }
     }, serializer.as_json)
   end
 
-  def test_implicity_detection_for_association_serializers 
+  def test_implicity_detection_for_association_serializers
     implicit_serializer = Class.new(ActiveModel::Serializer) do
       root :custom_blog
       const_set(:UserSerializer, UserSerializer)
@@ -456,7 +427,7 @@ class SerializerTest < ActiveModel::TestCase
     end
 
     posts = [
-      Post.new(:title => 'First Post', :body => 'text', :comments => []), 
+      Post.new(:title => 'First Post', :body => 'text', :comments => []),
       Post.new(:title => 'Second Post', :body => 'text', :comments => [])
     ]
     user = User.new
@@ -474,8 +445,8 @@ class SerializerTest < ActiveModel::TestCase
           {:title => 'Second Post', :body => 'text', :comments => []}
         ],
         :user => {
-          :first_name => "Jose", 
-          :last_name => "Valim", :ok => true, 
+          :first_name => "Jose",
+          :last_name => "Valim", :ok => true,
           :scope => true
         }
       }
@@ -549,15 +520,21 @@ class SerializerTest < ActiveModel::TestCase
         define_method(:model_class) do model end
       end
 
-      attributes :name, :age
+      # Computed attributes (not real columns or associations).
+      def can_edit; end
+      def drafts; end
+
+      attributes :name, :age, :can_edit
       has_many :posts, :serializer => Class.new
+      has_many :drafts, :serializer => Class.new
       has_one :parent, :serializer => Class.new
     end
 
     assert_equal serializer.schema, {
-      :attributes => { :name => :string, :age => :integer },
+      :attributes => { :name => :string, :age => :integer, :can_edit => nil },
       :associations => {
         :posts => { :has_many => :posts },
+        :drafts => nil,
         :parent => { :belongs_to => :parent }
       }
     }
@@ -612,7 +589,7 @@ class SerializerTest < ActiveModel::TestCase
       :post => {
         :title => "New Post",
         :body => "It's a new post!",
-        :author => 5
+        :author_id => 5
       }
     }, hash.as_json)
   end
@@ -734,6 +711,55 @@ class SerializerTest < ActiveModel::TestCase
     assert_equal expected, hash_object
   end
 
+  def test_embed_ids_include_true_with_root
+    serializer_class = post_serializer
+
+    serializer_class.class_eval do
+      root :post
+      embed :ids, :include => true
+      has_many :comments, :key => :comment_ids, :root => :comments
+      has_one :author, :serializer => DefaultUserSerializer, :key => :author_id, :root => :author
+    end
+
+    post = Post.new(:title => "New Post", :body => "Body of new post", :email => "tenderlove@tenderlove.com")
+    comments = [Comment.new(:title => "Comment1", :id => 1), Comment.new(:title => "Comment2", :id => 2)]
+    post.comments = comments
+
+    serializer = serializer_class.new(post)
+
+    assert_equal({
+    :post => {
+      :title => "New Post",
+      :body => "Body of new post",
+      :comment_ids => [1, 2],
+      :author_id => nil
+    },
+    :comments => [
+      { :title => "Comment1" },
+      { :title => "Comment2" }
+    ],
+    :author => []
+    }, serializer.as_json)
+
+    post.author = User.new(:id => 1)
+
+    serializer = serializer_class.new(post)
+
+    assert_equal({
+    :post => {
+      :title => "New Post",
+      :body => "Body of new post",
+      :comment_ids => [1, 2],
+      :author_id => 1
+    },
+    :comments => [
+      { :title => "Comment1" },
+      { :title => "Comment2" }
+    ],
+    :author => [{ :first_name => "Jose", :last_name => "Valim" }]
+    }, serializer.as_json)
+  end
+
   # the point of this test is to illustrate that deeply nested serializers
   # still side-load at the root.
   def test_embed_with_include_inserts_at_root
@@ -781,18 +807,465 @@ class SerializerTest < ActiveModel::TestCase
     actual = ActiveModel::ArraySerializer.new([post], :root => :posts).as_json
     assert_equal({
       :posts => [
-        { :title => "New Post", :body => "NEW POST", :id => 1, :comments => [1,2] }
+        { :title => "New Post", :body => "NEW POST", :id => 1, :comment_ids => [1,2] }
       ],
 
       :comments => [
-        { :body => "EWOT", :id => 1, :tags => [1,3] },
-        { :body => "YARLY", :id => 2, :tags => [1,2] }
+        { :body => "EWOT", :id => 1, :tag_ids => [1,3] },
+        { :body => "YARLY", :id => 2, :tag_ids => [1,2] }
       ],
 
       :tags => [
         { :name => "lolcat", :id => 1 },
         { :name => "violetcat", :id => 3 },
         { :name => "nyancat", :id => 2 }
+      ]
+    }, actual)
+  end
+
+  def test_can_customize_attributes
+    serializer = Class.new(ActiveModel::Serializer) do
+      attributes :title, :body
+
+      def title
+        object.title.upcase
+      end
+    end
+
+    klass = Class.new do
+      def read_attribute_for_serialization(name)
+        { :title => "New post!", :body => "First post body" }[name]
+      end
+
+      def title
+        read_attribute_for_serialization(:title)
+      end
+
+      def body
+        read_attribute_for_serialization(:body)
+      end
+    end
+
+    object = klass.new
+
+    actual = serializer.new(object, :root => :post).as_json
+
+    assert_equal({
+      :post => {
+        :title => "NEW POST!",
+        :body => "First post body"
+      }
+    }, actual)
+  end
+
+  def test_can_customize_attributes_with_read_attributes
+    serializer = Class.new(ActiveModel::Serializer) do
+      attributes :title, :body
+
+      def read_attribute_for_serialization(name)
+        { :title => "New post!", :body => "First post body" }[name]
+      end
+    end
+
+    actual = serializer.new(Object.new, :root => :post).as_json
+
+    assert_equal({
+      :post => {
+        :title => "New post!",
+        :body => "First post body"
+      }
+    }, actual)
+  end
+
+  def test_active_support_on_load_hooks_fired
+    loaded = nil
+    ActiveSupport.on_load(:active_model_serializers) do
+      loaded = self
+    end
+    assert_equal ActiveModel::Serializer, loaded
+  end
+
+  def tests_query_attributes_strip_question_mark
+    todo = Class.new do
+      def overdue?
+        true
+      end
+
+      def read_attribute_for_serialization(name)
+        send name
+      end
+    end
+
+    serializer = Class.new(ActiveModel::Serializer) do
+      attribute :overdue?
+    end
+
+    actual = serializer.new(todo.new).as_json
+
+    assert_equal({
+      :overdue => true
+    }, actual)
+  end
+
+  def tests_query_attributes_allow_key_option
+    todo = Class.new do
+      def overdue?
+        true
+      end
+
+      def read_attribute_for_serialization(name)
+        send name
+      end
+    end
+
+    serializer = Class.new(ActiveModel::Serializer) do
+      attribute :overdue?, :key => :foo
+    end
+
+    actual = serializer.new(todo.new).as_json
+
+    assert_equal({
+      :foo => true
+    }, actual)
+  end
+
+  def tests_can_handle_polymorphism
+    email_serializer = Class.new(ActiveModel::Serializer) do
+      attributes :subject, :body
+    end
+
+    email_class = Class.new(Model) do
+      def self.to_s
+        "Email"
+      end
+
+      define_method :active_model_serializer do
+        email_serializer
+      end
+    end
+
+    attachment_serializer = Class.new(ActiveModel::Serializer) do
+      attributes :name, :url
+      has_one :attachable, :polymorphic => true
+    end
+
+    email = email_class.new :subject => 'foo', :body => 'bar'
+
+    attachment = Attachment.new :name => 'logo.png', :url => 'http://example.com/logo.png', :attachable => email
+
+    actual = attachment_serializer.new(attachment, {}).as_json
+
+    assert_equal({
+      :name => 'logo.png',
+      :url => 'http://example.com/logo.png',
+      :attachable => {
+        :type => :email,
+        :email => { :subject => 'foo', :body => 'bar' }
+      }
+    }, actual)
+  end
+
+  def test_can_handle_polymoprhic_ids
+    email_serializer = Class.new(ActiveModel::Serializer) do
+      attributes :subject, :body
+    end
+
+    email_class = Class.new(Model) do
+      def self.to_s
+        "Email"
+      end
+
+      define_method :active_model_serializer do
+        email_serializer
+      end
+    end
+
+    attachment_serializer = Class.new(ActiveModel::Serializer) do
+      embed :ids
+      attributes :name, :url
+      has_one :attachable, :polymorphic => true
+    end
+
+    email = email_class.new :id => 1
+
+    attachment = Attachment.new :name => 'logo.png', :url => 'http://example.com/logo.png', :attachable => email
+
+    actual = attachment_serializer.new(attachment, {}).as_json
+
+    assert_equal({
+      :name => 'logo.png',
+      :url => 'http://example.com/logo.png',
+      :attachable => {
+        :type => :email,
+        :id => 1
+      }
+    }, actual)
+  end
+
+  def test_polymorphic_associations_are_included_at_root
+    email_serializer = Class.new(ActiveModel::Serializer) do
+      attributes :subject, :body, :id
+    end
+
+    email_class = Class.new(Model) do
+      def self.to_s
+        "Email"
+      end
+
+      define_method :active_model_serializer do
+        email_serializer
+      end
+    end
+
+    attachment_serializer = Class.new(ActiveModel::Serializer) do
+      root :attachment
+      embed :ids, :include => true
+      attributes :name, :url
+      has_one :attachable, :polymorphic => true
+    end
+
+    email = email_class.new :id => 1, :subject => "Hello", :body => "World"
+
+    attachment = Attachment.new :name => 'logo.png', :url => 'http://example.com/logo.png', :attachable => email
+
+    actual = attachment_serializer.new(attachment, {}).as_json
+
+    assert_equal({
+      :attachment => {
+        :name => 'logo.png',
+        :url => 'http://example.com/logo.png',
+        :attachable => {
+          :type => :email,
+          :id => 1
+        }},
+      :emails => [{
+        :id => 1,
+        :subject => "Hello",
+        :body => "World"
+      }]
+    }, actual)
+  end
+
+  def test_multiple_polymorphic_associations
+    email_serializer = Class.new(ActiveModel::Serializer) do
+      attributes :subject, :body, :id
+    end
+
+    orange_serializer = Class.new(ActiveModel::Serializer) do
+      embed :ids, :include => true
+
+      attributes :plu, :id
+      has_one :readable, :polymorphic => true
+    end
+
+    email_class = Class.new(Model) do
+      def self.to_s
+        "Email"
+      end
+
+      define_method :active_model_serializer do
+        email_serializer
+      end
+    end
+
+    orange_class = Class.new(Model) do
+      def self.to_s
+        "Orange"
+      end
+
+      def readable
+        @attributes[:readable]
+      end
+
+      define_method :active_model_serializer do
+        orange_serializer
+      end
+    end
+
+    attachment_serializer = Class.new(ActiveModel::Serializer) do
+      root :attachment
+      embed :ids, :include => true
+
+      attributes :name, :url
+
+      has_one :attachable, :polymorphic => true
+      has_one :readable,   :polymorphic => true
+      has_one :edible,     :polymorphic => true
+    end
+
+    email  = email_class.new  :id => 1, :subject => "Hello", :body => "World"
+    orange = orange_class.new :id => 1, :plu => "3027",  :readable => email
+
+    attachment = Attachment.new({
+      :name       => 'logo.png',
+      :url        => 'http://example.com/logo.png',
+      :attachable => email,
+      :readable   => email,
+      :edible     => orange
+    })
+
+    actual = attachment_serializer.new(attachment, {}).as_json
+
+    assert_equal({
+      :emails => [{
+        :subject => "Hello",
+        :body => "World",
+        :id => 1
+      }],
+
+      :oranges => [{
+        :plu => "3027",
+        :id => 1,
+        :readable => { :type => :email, :id => 1 }
+      }],
+
+      :attachment => {
+        :name => 'logo.png',
+        :url => 'http://example.com/logo.png',
+        :attachable => { :type => :email, :id => 1 },
+        :readable => { :type => :email, :id => 1 },
+        :edible => { :type => :orange, :id => 1 }
+      }
+    }, actual)
+  end
+
+  def test_raises_an_error_when_a_child_serializer_includes_associations_when_the_source_doesnt
+    attachment_serializer = Class.new(ActiveModel::Serializer) do
+      attributes :name
+    end
+
+    fruit_serializer = Class.new(ActiveModel::Serializer) do
+      embed :ids, :include => true
+      has_one :attachment, :serializer => attachment_serializer
+      attribute :color
+    end
+
+    banana_class = Class.new Model do
+      def self.to_s
+        'banana'
+      end
+
+      def attachment
+        @attributes[:attachment]
+      end
+
+      define_method :active_model_serializer do
+        fruit_serializer
+      end
+    end
+
+    strawberry_class = Class.new Model do
+      def self.to_s
+        'strawberry'
+      end
+
+      def attachment
+        @attributes[:attachment]
+      end
+
+      define_method :active_model_serializer do
+        fruit_serializer
+      end
+    end
+
+    smoothie = Class.new do
+      attr_reader :base, :flavor
+
+      def initialize(base, flavor)
+        @base, @flavor = base, flavor
+      end
+    end
+
+    smoothie_serializer = Class.new(ActiveModel::Serializer) do
+      root false
+      embed :ids, :include => true
+
+      has_one :base, :polymorphic => true
+      has_one :flavor, :polymorphic => true
+    end
+
+    banana_attachment = Attachment.new({
+      :name => 'banana_blending.md',
+      :id => 3,
+    })
+
+    strawberry_attachment = Attachment.new({
+      :name => 'strawberry_cleaning.doc',
+      :id => 4
+    })
+
+    banana = banana_class.new :color => "yellow", :id => 1, :attachment => banana_attachment
+    strawberry = strawberry_class.new :color => "red", :id => 2, :attachment => strawberry_attachment
+
+    smoothie = smoothie_serializer.new(smoothie.new(banana, strawberry))
+
+    assert_raise ActiveModel::Serializer::IncludeError do
+      smoothie.as_json
+    end
+  end
+
+  def tests_includes_does_not_include_nil_polymoprhic_associations
+    post_serializer = Class.new(ActiveModel::Serializer) do
+      root :post
+      embed :ids, :include => true
+      has_one :author, :polymorphic => true
+      attributes :title
+    end
+
+    post = Post.new(:title => 'Foo')
+
+    actual = post_serializer.new(post).as_json
+
+    assert_equal({
+      :post => {
+        :title => 'Foo',
+        :author => nil
+      }
+    }, actual)
+  end
+
+  def test_meta_key_serialization
+    tag_serializer = Class.new(ActiveModel::Serializer) do
+      attributes :name
+    end
+
+    tag_class = Class.new(Model) do
+      def name
+        @attributes[:name]
+      end
+
+      define_method :active_model_serializer do
+        tag_serializer
+      end
+    end
+
+    serializable_array = Class.new(Array)
+
+    array = serializable_array.new
+    array << tag_class.new(:name => 'Rails')
+    array << tag_class.new(:name => 'Sinatra')
+
+    actual = array.active_model_serializer.new(array, :root => :tags, :meta => {:total => 10}).as_json
+
+    assert_equal({
+      :meta => {
+        :total => 10,
+      },
+      :tags => [
+        { :name => "Rails" },
+        { :name => "Sinatra" },
+      ]
+    }, actual)
+
+    actual = array.active_model_serializer.new(array, :root => :tags, :meta => {:total => 10}, :meta_key => 'meta_object').as_json
+
+    assert_equal({
+      :meta_object => {
+        :total => 10,
+      },
+      :tags => [
+        { :name => "Rails" },
+        { :name => "Sinatra" },
       ]
     }, actual)
   end

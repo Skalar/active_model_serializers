@@ -1,89 +1,12 @@
 require "active_support/core_ext/class/attribute"
 require "active_support/core_ext/module/anonymous"
-require "set"
 
 module ActiveModel
-  class OrderedSet
-    def initialize(array)
-      @array = array
-      @hash = {}
-
-      array.each do |item|
-        @hash[item] = true
-      end
-    end
-
-    def merge!(other)
-      other.each do |item|
-        next if @hash.key?(item)
-
-        @hash[item] = true
-        @array.push item
-      end
-    end
-
-    def to_a
-      @array
-    end
-  end
-
-  # Active Model Default Serializer
-  #
-  # This is a dummy serializer that simply calls to_json on its subject. Useful
-  # to maintain a consistent interface for the ArraySerializer. Also, this would
-  # be a good place to include options that should affect all JSON generated.
-  class DefaultSerializer
-    attr_reader :object, :options
-
-    def initialize(object, options={})
-      @object, @options = object, options
-    end
-
-    def serializable_hash
-      object.to_json
-    end
-  end
-
-  # Active Model Array Serializer
-  #
-  # It serializes an array checking if each element that implements
-  # the +active_model_serializer+ method.
-  class ArraySerializer
-    attr_reader :object, :options
-
-    def initialize(object, options={})
-      @object, @options = object, options
-    end
-
-    def serializable_array
-      @object.map do |item|
-        if item.respond_to?(:active_model_serializer) && (serializer = item.active_model_serializer)
-          serializer.new(item, @options)
-        else
-          DefaultSerializer.new(item, @options)
-        end
-      end
-    end
-
-    def as_json(*args)
-      @options[:hash] = hash = {}
-      @options[:unique_values] = {}
-
-      array = serializable_array.map(&:serializable_hash)
-
-      if root = @options[:root]
-        hash.merge!(root => array)
-      else
-        array
-      end
-    end
-  end
-
   # Active Model Serializer
   #
   # Provides a basic serializer implementation that allows you to easily
   # control how a given object is going to be serialized. On initialization,
-  # it expects to object as arguments, a resource and options. For example,
+  # it expects two objects as arguments, a resource and options. For example,
   # one may do in a controller:
   #
   #     PostSerializer.new(@post, :scope => current_user).to_json
@@ -92,7 +15,7 @@ module ActiveModel
   # in for authorization purposes.
   #
   # We use the scope to check if a given attribute should be serialized or not.
-  # For example, some attributes maybe only be returned if +current_user+ is the
+  # For example, some attributes may only be returned if +current_user+ is the
   # author of the post:
   #
   #     class PostSerializer < ActiveModel::Serializer
@@ -113,132 +36,18 @@ module ActiveModel
   #     end
   #
   class Serializer
-    module Associations #:nodoc:
-      class Config #:nodoc:
-        class_attribute :options
+    INCLUDE_METHODS = {}
+    INSTRUMENT = { :serialize => :"serialize.serializer", :associations => :"associations.serializer" }
 
-        def self.refine(name, class_options)
-          current_class = self
+    class IncludeError < StandardError
+      attr_reader :source, :association
 
-          Class.new(self) do
-            singleton_class.class_eval do
-              define_method(:to_s) do
-                "(subclass of #{current_class.name})"
-              end
-
-              alias inspect to_s
-            end
-
-            self.options = class_options
-          end
-        end
-
-        self.options = {}
-
-        def initialize(name, source, options={})
-          @name = name
-          @source = source
-          @options = options
-        end
-
-        def option(key, default=nil)
-          if @options.key?(key)
-            @options[key]
-          elsif self.class.options.key?(key)
-            self.class.options[key]
-          else
-            default
-          end
-        end
-
-        def target_serializer
-          option(:serializer)
-        end
-
-        def source_serializer
-          @source
-        end
-
-        def key
-          option(:key) || @name
-        end
-
-        def name
-          option(:name) || @name
-        end
-
-        def associated_object
-          option(:value) || source_serializer.send(name)
-        end
-
-        def embed_ids?
-          option(:embed, source_serializer._embed) == :ids
-        end
-
-        def embed_objects?
-          option(:embed, source_serializer._embed) == :objects
-        end
-
-        def embed_in_root?
-          option(:include, source_serializer._root_embed)
-        end
-
-      protected
-
-        def find_serializable(object)
-          if target_serializer
-            target_serializer.new(object, source_serializer.options)
-          elsif object.respond_to?(:active_model_serializer) && (ams = object.active_model_serializer)
-            ams.new(object, source_serializer.options)
-          else
-            object
-          end
-        end
+      def initialize(source, association)
+        @source, @association = source, association
       end
 
-      class HasMany < Config #:nodoc:
-        alias plural_key key
-
-        def serialize
-          associated_object.map do |item|
-            find_serializable(item).serializable_hash
-          end
-        end
-        alias serialize_many serialize
-
-        def serialize_ids
-          # Use pluck or select_columns if available
-          # return collection.ids if collection.respond_to?(:ids)
-
-          associated_object.map do |item|
-            item.read_attribute_for_serialization(:id)
-          end
-        end
-      end
-
-      class HasOne < Config #:nodoc:
-        def plural_key
-          key.to_s.pluralize.to_sym
-        end
-
-        def serialize
-          object = associated_object
-          object && find_serializable(object).serializable_hash
-        end
-
-        def serialize_many
-          object = associated_object
-          value = object && find_serializable(object).serializable_hash
-          value ? [value] : []
-        end
-
-        def serialize_ids
-          if object = associated_object
-            object.read_attribute_for_serialization(:id)
-          else
-            nil
-          end
-        end
+      def to_s
+        "Cannot serialize #{association} when #{source} does not have a root!"
       end
     end
 
@@ -259,12 +68,26 @@ module ActiveModel
         self._attributes = _attributes.dup
 
         attrs.each do |attr|
-          self._attributes[attr] = attr
+          attribute attr
         end
       end
 
       def attribute(attr, options={}, &block)
-        self._attributes = _attributes.merge((options[:key] || attr) => (block || attr))
+        self._attributes = _attributes.merge(attr => options[:key] || attr.to_s.gsub(/\?$/, '').to_sym)
+
+        unless method_defined?(attr)
+          if block_given?
+            define_method attr do
+              object.instance_eval &block
+            end
+          else
+            define_method attr do
+              object.read_attribute_for_serialization(attr.to_sym)
+            end
+          end
+        end
+
+        define_include_method attr
       end
 
       def associate(klass, attrs) #:nodoc:
@@ -273,10 +96,26 @@ module ActiveModel
 
         attrs.each do |attr|
           unless method_defined?(attr)
-            class_eval "def #{attr}() object.#{attr} end", __FILE__, __LINE__
+            define_method attr do
+              object.send attr
+            end
           end
 
+          define_include_method attr
+
           self._associations[attr] = klass.refine(attr, options)
+        end
+      end
+
+      def define_include_method(name)
+        method = "include_#{name}?".to_sym
+
+        INCLUDE_METHODS[name] = method
+
+        unless method_defined?(method)
+          define_method method do
+            true
+          end
         end
       end
 
@@ -310,7 +149,7 @@ module ActiveModel
       #     { :name => :string, :age => :integer }
       #
       # The +associations+ hash looks like this:
-           { :posts => { :has_many => :posts } }
+      #     { :posts => { :has_many => :posts } }
       #
       # If :key is used:
       #
@@ -336,16 +175,31 @@ module ActiveModel
         klass = model_class
         columns = klass.columns_hash
 
-        attrs = _attributes.inject({}) do |hash, (name,key)|
-          column = columns[name.to_s]
-          hash.merge key => column.type
+        attrs = {}
+        _attributes.each do |name, key|
+          if column = columns[name.to_s]
+            attrs[key] = column.type
+          else
+            # Computed attribute (method on serializer or model). We cannot
+            # infer the type, so we put nil.
+            attrs[key] = nil
+          end
         end
 
-        associations = _associations.inject({}) do |hash, (attr,association_class)|
+        associations = {}
+        _associations.each do |attr, association_class|
           association = association_class.new(attr, self)
 
-          model_association = klass.reflect_on_association(association.name)
-          hash.merge association.key => { model_association.macro => model_association.name }
+          if model_association = klass.reflect_on_association(association.name)
+            # Real association.
+            associations[association.key] = { model_association.macro => model_association.name }
+          else
+            # Computed association. We could infer has_many vs. has_one from
+            # the association class, but that would make it different from
+            # real associations, which read has_one vs. belongs_to from the
+            # model.
+            associations[association.key] = nil
+          end
         end
 
         { :attributes => attrs, :associations => associations }
@@ -371,13 +225,13 @@ module ActiveModel
       def root(name)
         self._root = name
       end
+      alias_method :root=, :root
 
       def inherited(klass) #:nodoc:
         return if klass.anonymous?
         name = klass.name.demodulize.underscore.sub(/_serializer$/, '')
 
         klass.class_eval do
-          alias_method name.to_sym, :object
           root name.to_sym unless self._root == false
         end
       end
@@ -389,15 +243,27 @@ module ActiveModel
       @object, @options = object, options
     end
 
+    def url_options
+      @options[:url_options] || {}
+    end
+
+    def meta_key
+      @options[:meta_key].try(:to_sym) || :meta
+    end
+
+    def include_meta(hash)
+      hash[meta_key] = @options[:meta] if @options.has_key?(:meta)
+    end
+
     # Returns a json representation of the serializable
     # object including the root.
-    def as_json(options=nil)
-      options ||= {}
+    def as_json(options={})
       if root = options.fetch(:root, @options.fetch(:root, _root))
         @options[:hash] = hash = {}
         @options[:unique_values] = {}
 
         hash.merge!(root => serializable_hash)
+        include_meta hash
         hash
       else
         serializable_hash
@@ -407,31 +273,23 @@ module ActiveModel
     # Returns a hash representation of the serializable
     # object without the root.
     def serializable_hash
-      node = attributes
-      include_associations!(node) if _embed
-      node
-    end
-
-    def include_associations!(node)
-      _associations.each do |attr, klass|
-        opts = { :node => node }
-
-        if options.include?(:include) || options.include?(:exclude)
-          opts[:include] = included_association?(attr)
+      instrument(:serialize, :serializer => self.class.name) do
+        @node = attributes
+        instrument :associations do
+          include_associations! if _embed
         end
-
-        include! attr, opts
+        @node
       end
     end
 
-    def included_association?(name)
-      if options.key?(:include)
-        options[:include].include?(name)
-      elsif options.key?(:exclude)
-        !options[:exclude].include?(name)
-      else
-        true
+    def include_associations!
+      _associations.each_key do |name|
+        include!(name) if include?(name)
       end
+    end
+
+    def include?(name)
+      send INCLUDE_METHODS[name]
     end
 
     def include!(name, options={})
@@ -453,8 +311,16 @@ module ActiveModel
           @options[:unique_values] ||= {}
         end
 
-      node = options[:node]
+      node = options[:node] ||= @node
       value = options[:value]
+
+      if options[:include] == nil
+        if @options.key?(:include)
+          options[:include] = @options[:include].include?(name)
+        elsif @options.include?(:exclude)
+          options[:include] = !@options[:exclude].include?(name)
+        end
+      end
 
       association_class =
         if klass = _associations[name]
@@ -470,8 +336,10 @@ module ActiveModel
       if association.embed_ids?
         node[association.key] = association.serialize_ids
 
-        if association.embed_in_root?
-          merge_association hash, association.plural_key, association.serialize_many, unique_values
+        if association.embed_in_root? && hash.nil?
+          raise IncludeError.new(self.class, association.name)
+        elsif association.embed_in_root? && association.embeddable?
+          merge_association hash, association.root, association.serializables, unique_values
         end
       elsif association.embed_objects?
         node[association.key] = association.serialize
@@ -487,13 +355,15 @@ module ActiveModel
     # a unique list of all of the objects that are already in the Array. This
     # avoids the need to scan through the Array looking for entries every time
     # we want to merge a new list of values.
-    def merge_association(hash, key, value, unique_values)
-      if current_value = unique_values[key]
-        current_value.merge! value
-        hash[key] = current_value.to_a
-      elsif value
-        hash[key] = value
-        unique_values[key] = OrderedSet.new(value)
+    def merge_association(hash, key, serializables, unique_values)
+      already_serialized = (unique_values[key] ||= {})
+      serializable_hashes = (hash[key] ||= [])
+
+      serializables.each do |serializable|
+        unless already_serialized.include? serializable.object
+          already_serialized[serializable.object] = true
+          serializable_hashes << serializable.serializable_hash
+        end
       end
     end
 
@@ -502,22 +372,26 @@ module ActiveModel
     def attributes
       hash = {}
 
-      _attributes.each do |key, value|
-        hash[key] = if value.respond_to? :call
-                      @object.instance_eval(&value)
-                    else
-                      @object.read_attribute_for_serialization(value)
-                    end
+      _attributes.each do |name,key|
+        hash[key] = read_attribute_for_serialization(name) if include?(name)
       end
 
       hash
     end
-  end
-end
 
-class Array
-  # Array uses ActiveModel::ArraySerializer.
-  def active_model_serializer
-    ActiveModel::ArraySerializer
+
+    # Returns options[:scope]
+    def scope
+      @options[:scope]
+    end
+
+    alias :read_attribute_for_serialization :send
+
+    # Use ActiveSupport::Notifications to send events to external systems.
+    # The event name is: name.class_name.serializer
+    def instrument(name, payload = {}, &block)
+      event_name = INSTRUMENT[name]
+      ActiveSupport::Notifications.instrument(event_name, payload, &block)
+    end
   end
 end
