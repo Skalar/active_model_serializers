@@ -77,6 +77,8 @@ module ActiveModel
 
         unless method_defined?(attr)
           if block_given?
+            ActiveSupport::Deprecation.warn "Please don't give a block when defining #{attr}. Instead, simply define an instance method on the serializer."
+
             define_method attr do
               object.instance_eval &block
             end
