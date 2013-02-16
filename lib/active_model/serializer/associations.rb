@@ -92,10 +92,13 @@ module ActiveModel
       end
 
       class HasMany < Config #:nodoc:
+        class_attribute :embed_ids_old_style, instance_writer: false
+        self.embed_ids_old_style = false
+
         def key
           if key = option(:key)
             key
-          elsif embed_ids?
+          elsif embed_ids? && !embed_ids_old_style
             "#{@name.to_s.singularize}_ids".to_sym
           else
             @name
