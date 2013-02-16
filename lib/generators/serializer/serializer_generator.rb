@@ -17,7 +17,7 @@ module Rails
       private
 
       def attributes_names
-        attributes.select { |attr| !attr.reference? }.map { |a| a.name.to_sym }
+        [:id] + attributes.select { |attr| !attr.reference? }.map { |a| a.name.to_sym }
       end
 
       def association_names
@@ -30,7 +30,7 @@ module Rails
         # Only works on 3.2
         # elsif (n = Rails::Generators.namespace) && n.const_defined?(:ApplicationSerializer)
         #   "ApplicationSerializer"
-        elsif Object.const_defined?(:ApplicationSerializer)
+        elsif defined?(::ApplicationSerializer)
           "ApplicationSerializer"
         else
           "ActiveModel::Serializer"

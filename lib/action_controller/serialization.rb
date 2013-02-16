@@ -33,7 +33,7 @@ module ActionController
     end
 
     def serialization_scope
-      send(_serialization_scope)
+      send(_serialization_scope) if _serialization_scope && respond_to?(_serialization_scope)
     end
 
     def default_serializer_options
@@ -41,23 +41,31 @@ module ActionController
 
     [:json, :xml].each do |format|
       define_method("_render_option_#{format}") do |object, options|
-        if object.respond_to?(:to_ary)
-          options[:root] ||= controller_name
-        end
+        options = default_serializer_options.merge(options) if default_serializer_options
 
         serializer = options.delete(:serializer) ||
           (object.respond_to?(:active_model_serializer) && object.active_model_serializer)
 
-        if serializer
-          options[:scope] = serialization_scope
-
-          if default_options = default_serializer_options
-            options = options.merge(default_options)
+        if object.respond_to?(:to_ary)
+          unless serializer <= ActiveModel::ArraySerializer
+            raise ArgumentError.new("#{serializer.name} is not an ArraySerializer. " +
+               "You may want to use the :each_serializer option instead.")
           end
 
+          if options[:root] != false && serializer.root != false
+            # default root element for arrays is serializer's root or the controller name
+            # the serializer for an Array is ActiveModel::ArraySerializer
+            options[:root] ||= serializer.root || controller_name
+          end
+        end
+
+        if serializer
+          options[:scope] = serialization_scope unless options.has_key?(:scope)
+          options[:url_options] = url_options
           object = serializer.new(object, options)
         end
-        super(object, options)
+
+        super object, options
       end
     end
 

@@ -30,6 +30,9 @@ class AssociationTest < ActiveModel::TestCase
   end
 
   def setup
+    @hash = {}
+    @root_hash = {}
+
     @post = Model.new(:title => "New Post", :body => "Body")
     @comment = Model.new(:id => 1, :body => "ZOMG A COMMENT")
     @post.comments = [ @comment ]
@@ -43,17 +46,13 @@ class AssociationTest < ActiveModel::TestCase
       attributes :title, :body
     end
 
-    @post_serializer = @post_serializer_class.new(@post)
-
-    @hash = {}
-    @root_hash = {}
+    @post_serializer = @post_serializer_class.new(@post, :hash => @root_hash)
   end
 
   def include!(key, options={})
     @post_serializer.include! key, {
       :embed => :ids,
       :include => true,
-      :hash => @root_hash,
       :node => @hash,
       :serializer => @comment_serializer_class
     }.merge(options)
@@ -61,7 +60,6 @@ class AssociationTest < ActiveModel::TestCase
 
   def include_bare!(key, options={})
     @post_serializer.include! key, {
-      :hash => @root_hash,
       :node => @hash,
       :serializer => @comment_serializer_class
     }.merge(options)
@@ -72,7 +70,7 @@ class AssociationTest < ActiveModel::TestCase
       include! :comments, :value => @post.comments
 
       assert_equal({
-        :comments => [ 1 ]
+        :comment_ids => [ 1 ]
       }, @hash)
 
       assert_equal({
@@ -93,7 +91,7 @@ class AssociationTest < ActiveModel::TestCase
       include! :comments, :value => @post.comments, :embed => :ids, :include => false
 
       assert_equal({
-        :comments => [ 1 ]
+        :comment_ids => [ 1 ]
       }, @hash)
 
       assert_equal({}, @root_hash)
@@ -103,7 +101,7 @@ class AssociationTest < ActiveModel::TestCase
       include! :comment, :value => @post.comment
 
       assert_equal({
-        :comment => 1
+        :comment_id => 1
       }, @hash)
 
       assert_equal({
@@ -121,7 +119,7 @@ class AssociationTest < ActiveModel::TestCase
       include! :comments
 
       assert_equal({
-        :comments => [ 1 ]
+        :comment_ids => [ 1 ]
       }, @hash)
 
       assert_equal({
@@ -139,7 +137,7 @@ class AssociationTest < ActiveModel::TestCase
       include! :comment
 
       assert_equal({
-        :comment => 1
+        :comment_id => 1
       }, @hash)
 
       assert_equal({
@@ -161,7 +159,7 @@ class AssociationTest < ActiveModel::TestCase
       }, @hash)
 
       assert_equal({
-        :custom_comments => [
+        :comments => [
           { :id => 1, :body => "ZOMG A COMMENT" }
         ]
       }, @root_hash)
@@ -169,35 +167,17 @@ class AssociationTest < ActiveModel::TestCase
 
     def test_with_default_has_one_with_custom_key
       @post_serializer_class.class_eval do
-        has_one :comment, :key => :custom_comment
+        has_one :comment, :key => :custom_comment_id
       end
 
       include! :comment
 
       assert_equal({
-        :custom_comment => 1
+        :custom_comment_id => 1
       }, @hash)
 
       assert_equal({
-        :custom_comments => [
-          { :id => 1, :body => "ZOMG A COMMENT" }
-        ]
-      }, @root_hash)
-    end
-
-    def test_with_default_has_one_with_custom_key
-      @post_serializer_class.class_eval do
-        has_one :comment, :key => :custom_comment
-      end
-
-      include! :comment
-
-      assert_equal({
-        :custom_comment => 1
-      }, @hash)
-
-      assert_equal({
-        :custom_comments => [
+        :comments => [
           { :id => 1, :body => "ZOMG A COMMENT" }
         ]
       }, @root_hash)
@@ -227,7 +207,7 @@ class AssociationTest < ActiveModel::TestCase
       include_bare! :comments
 
       assert_equal({
-        :comments => [ 1 ]
+        :comment_ids => [ 1 ]
       }, @hash)
 
       assert_equal({}, @root_hash)
@@ -252,7 +232,7 @@ class AssociationTest < ActiveModel::TestCase
       include_bare! :comments
 
       assert_equal({
-        :comments => [ 1 ]
+        :comment_ids => [ 1 ]
       }, @hash)
 
       assert_equal({
@@ -270,7 +250,7 @@ class AssociationTest < ActiveModel::TestCase
       include_bare! :comment
 
       assert_equal({
-        :comment => 1
+        :comment_id => 1
       }, @hash)
 
       assert_equal({}, @root_hash)
@@ -295,7 +275,7 @@ class AssociationTest < ActiveModel::TestCase
       include_bare! :comment
 
       assert_equal({
-        :comment => 1
+        :comment_id => 1
       }, @hash)
 
       assert_equal({
@@ -303,6 +283,29 @@ class AssociationTest < ActiveModel::TestCase
           { :id => 1, :body => "ZOMG A COMMENT" }
         ]
       }, @root_hash)
+    end
+
+    def test_embed_ids_include_true_does_not_serialize_multiple_times
+      @post.recent_comment = @comment
+
+      @post_serializer_class.class_eval do
+        has_one :comment, :embed => :ids, :include => true
+        has_one :recent_comment, :embed => :ids, :include => true, :root => :comments
+      end
+
+      # Count how often the @comment record is serialized.
+      serialized_times = 0
+      @comment.class_eval do
+        define_method :read_attribute_for_serialization, lambda { |name|
+          serialized_times += 1 if name == :body
+          super(name)
+        }
+      end
+
+      include_bare! :comment
+      include_bare! :recent_comment
+
+      assert_equal 1, serialized_times
     end
   end
 
@@ -330,7 +333,7 @@ class AssociationTest < ActiveModel::TestCase
         :post => {
           :title => "New Post",
           :body => "Body",
-          :comments => [ 1 ]
+          :comment_ids => [ 1 ]
         },
         :comments => [
           { :id => 1, :body => "ZOMG A COMMENT" }
@@ -349,7 +352,7 @@ class AssociationTest < ActiveModel::TestCase
         :post => {
           :title => "New Post",
           :body => "Body",
-          :comments => [ 1 ]
+          :comment_ids => [ 1 ]
         }
       }, json)
     end
@@ -365,7 +368,7 @@ class AssociationTest < ActiveModel::TestCase
         :post => {
           :title => "New Post",
           :body => "Body",
-          :comments => [ 1 ]
+          :comment_ids => [ 1 ]
         }
       }, json)
     end
@@ -381,7 +384,7 @@ class AssociationTest < ActiveModel::TestCase
         :post => {
           :title => "New Post",
           :body => "Body",
-          :comments => [ 1 ]
+          :comment_ids => [ 1 ]
         },
         :comments => [
           { :id => 1, :body => "ZOMG A COMMENT" }
