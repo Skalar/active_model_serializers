@@ -54,9 +54,10 @@ module ActiveModel
       end
     end
 
-    def to_xml(*args)
-      # TODO ADD CACHE
-      serializable_array.map(&:serializable_hash).to_xml(*args)
+    def to_xml(options = {})
+      # TODO caching
+      options[:root] ||= @options[:root]
+      serializable_array.to_xml(options)
     end
 
     def to_json(*args)
