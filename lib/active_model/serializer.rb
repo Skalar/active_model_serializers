@@ -1,5 +1,7 @@
 require "active_support/core_ext/class/attribute"
 require "active_support/core_ext/module/anonymous"
+require 'active_support/dependencies'
+require 'active_support/descendants_tracker'
 
 module ActiveModel
   # Active Model Serializer
@@ -36,6 +38,8 @@ module ActiveModel
   #     end
   #
   class Serializer
+    extend ActiveSupport::DescendantsTracker
+
     INCLUDE_METHODS = {}
     INSTRUMENT = { :serialize => :"serialize.serializer", :associations => :"associations.serializer" }
 
@@ -62,34 +66,50 @@ module ActiveModel
     self._embed = :objects
     class_attribute :_root_embed
 
+    class_attribute :cache
+    class_attribute :perform_caching
+
     class << self
+      # set perform caching like root
+      def cached(value = true)
+        self.perform_caching = value
+      end
+
       # Define attributes to be used in the serialization.
       def attributes(*attrs)
+
         self._attributes = _attributes.dup
 
         attrs.each do |attr|
-          attribute attr
+          if Hash === attr
+            attr.each {|attr_real, key| attribute attr_real, :key => key }
+          else
+            attribute attr
+          end
         end
       end
 
-      def attribute(attr, options={}, &block)
-        self._attributes = _attributes.merge(attr => options[:key] || attr.to_s.gsub(/\?$/, '').to_sym)
+      def attribute(attr, options={})
+        self._attributes = _attributes.merge(attr.is_a?(Hash) ? attr : {attr => options[:key] || attr.to_s.gsub(/\?$/, '').to_sym})
+
+        attr = attr.keys[0] if attr.is_a? Hash
 
         unless method_defined?(attr)
-          if block_given?
-            ActiveSupport::Deprecation.warn "Please don't give a block when defining #{attr}. Instead, simply define an instance method on the serializer."
-
-            define_method attr do
-              object.instance_eval &block
-            end
-          else
-            define_method attr do
-              object.read_attribute_for_serialization(attr.to_sym)
-            end
+          define_method attr do
+            object.read_attribute_for_serialization(attr.to_sym)
           end
         end
 
         define_include_method attr
+
+        # protect inheritance chains and open classes
+        # if a serializer inherits from another OR
+        #  attributes are added later in a classes lifecycle
+        # poison the cache
+        define_method :_fast_attributes do
+          raise NameError
+        end
+
       end
 
       def associate(klass, attrs) #:nodoc:
@@ -183,8 +203,12 @@ module ActiveModel
             attrs[key] = column.type
           else
             # Computed attribute (method on serializer or model). We cannot
-            # infer the type, so we put nil.
-            attrs[key] = nil
+            # infer the type, so we put nil, unless specified in the attribute declaration
+            if name != key
+              attrs[name] = key
+            else
+              attrs[key] = nil
+            end
           end
         end
 
@@ -229,13 +253,37 @@ module ActiveModel
       end
       alias_method :root=, :root
 
-      def inherited(klass) #:nodoc:
-        return if klass.anonymous?
-        name = klass.name.demodulize.underscore.sub(/_serializer$/, '')
+      # Used internally to create a new serializer object based on controller
+      # settings and options for a given resource. These settings are typically
+      # set during the request lifecycle or by the controller class, and should
+      # not be manually defined for this method.
+      def build_json(controller, resource, options)
+        default_options = controller.send(:default_serializer_options) || {}
+        options = default_options.merge(options || {})
 
-        klass.class_eval do
-          root name.to_sym unless self._root == false
+        serializer = options.delete(:serializer) ||
+          (resource.respond_to?(:active_model_serializer) &&
+           resource.active_model_serializer)
+
+        return serializer unless serializer
+
+        if resource.respond_to?(:to_ary)
+          unless serializer <= ActiveModel::ArraySerializer
+            raise ArgumentError.new("#{serializer.name} is not an ArraySerializer. " +
+                                    "You may want to use the :each_serializer option instead.")
+          end
+
+          if options[:root] != false && serializer.root != false
+            # the serializer for an Array is ActiveModel::ArraySerializer
+            options[:root] ||= serializer.root || controller.controller_name
+          end
         end
+
+        options[:scope] = controller.serialization_scope unless options.has_key?(:scope)
+        options[:scope_name] = controller._serialization_scope
+        options[:url_options] = controller.url_options
+
+        serializer.new(resource, options)
       end
     end
 
@@ -243,6 +291,25 @@ module ActiveModel
 
     def initialize(object, options={})
       @object, @options = object, options
+
+      scope_name = @options[:scope_name]
+      if scope_name && !respond_to?(scope_name)
+        self.class.class_eval do
+          define_method scope_name, lambda { scope }
+        end
+      end
+    end
+
+    def root_name
+      return false if self._root == false
+
+      class_name = self.class.name.demodulize.underscore.sub(/_serializer$/, '').to_sym unless self.class.name.blank?
+
+      if self._root == true
+        class_name
+      else
+        self._root || class_name
+      end
     end
 
     def url_options
@@ -257,10 +324,30 @@ module ActiveModel
       hash[meta_key] = @options[:meta] if @options.has_key?(:meta)
     end
 
+    def to_json(*args)
+      if perform_caching?
+        cache.fetch expand_cache_key([self.class.to_s.underscore, cache_key, 'to-json']) do
+          super
+        end
+      else
+        super
+      end
+    end
+
+    def to_xml(options={})
+      if perform_caching?
+        cache.fetch expand_cache_key([self.class.to_s.underscore, cache_key, 'to-json']) do
+          serializable_hash.to_xml({root: @options.fetch(:root, root_name) }.merge options)
+        end
+      else
+        serializable_hash.to_xml({root: @options.fetch(:root, root_name) }.merge options)
+      end
+    end
+
     # Returns a json representation of the serializable
     # object including the root.
     def as_json(options={})
-      if root = options.fetch(:root, @options.fetch(:root, _root))
+      if root = options.fetch(:root, @options.fetch(:root, root_name))
         @options[:hash] = hash = {}
         @options[:unique_values] = {}
 
@@ -272,19 +359,15 @@ module ActiveModel
       end
     end
 
-    def to_xml(options={})
-      serializable_hash.to_xml({ root: @options.fetch(:root, _root) }.merge options)
-    end
-
     # Returns a hash representation of the serializable
     # object without the root.
     def serializable_hash
-      instrument(:serialize, :serializer => self.class.name) do
-        @node = attributes
-        instrument :associations do
-          include_associations! if _embed
+      if perform_caching?
+        cache.fetch expand_cache_key([self.class.to_s.underscore, cache_key, 'serializable-hash']) do
+          _serializable_hash
         end
-        @node
+      else
+        _serializable_hash
       end
     end
 
@@ -295,6 +378,8 @@ module ActiveModel
     end
 
     def include?(name)
+      return false if @options.key?(:only) && !Array(@options[:only]).include?(name)
+      return false if @options.key?(:except) && Array(@options[:except]).include?(name)
       send INCLUDE_METHODS[name]
     end
 
@@ -376,13 +461,19 @@ module ActiveModel
     # Returns a hash representation of the serializable
     # object attributes.
     def attributes
-      hash = {}
+      _fast_attributes
+      rescue NameError
+        method = "def _fast_attributes\n"
 
-      _attributes.each do |name,key|
-        hash[key] = read_attribute_for_serialization(name) if include?(name)
-      end
+        method << "  h = {}\n"
 
-      hash
+        _attributes.each do |name,key|
+          method << "  h[:\"#{key}\"] = read_attribute_for_serialization(:\"#{name}\") if include?(:\"#{name}\")\n"
+        end
+        method << "  h\nend"
+
+        self.class.class_eval method
+        _fast_attributes
     end
 
 
@@ -393,11 +484,42 @@ module ActiveModel
 
     alias :read_attribute_for_serialization :send
 
+    def _serializable_hash
+      return nil if @object.nil?
+      @node = attributes
+      include_associations! if _embed
+      @node
+    end
+
+    def perform_caching?
+      perform_caching && cache && respond_to?(:cache_key)
+    end
+
+    def expand_cache_key(*args)
+      ActiveSupport::Cache.expand_cache_key(args)
+    end
+
     # Use ActiveSupport::Notifications to send events to external systems.
     # The event name is: name.class_name.serializer
     def instrument(name, payload = {}, &block)
       event_name = INSTRUMENT[name]
       ActiveSupport::Notifications.instrument(event_name, payload, &block)
+    end
+  end
+
+  # DefaultSerializer
+  #
+  # Provides a constant interface for all items, particularly
+  # for ArraySerializer.
+  class DefaultSerializer
+    attr_reader :object, :options
+
+    def initialize(object, options={})
+      @object, @options = object, options
+    end
+
+    def serializable_hash
+      @object.as_json(@options)
     end
   end
 end

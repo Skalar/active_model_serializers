@@ -1,4 +1,4 @@
-[![Build Status](https://secure.travis-ci.org/rails-api/active_model_serializers.png)](http://travis-ci.org/rails-api/active_model_serializers)
+[![Build Status](https://api.travis-ci.org/rails-api/active_model_serializers.png)](https://travis-ci.org/rails-api/active_model_serializers) [![Code Climate](https://codeclimate.com/github/rails-api/active_model_serializers.png)](https://codeclimate.com/github/rails-api/active_model_serializers) [![Coverage Status](https://coveralls.io/repos/rails-api/active_model_serializers/badge.png?branch=master)](https://coveralls.io/r/rails-api/active_model_serializers) 
 
 # Purpose
 
@@ -10,16 +10,16 @@ Serializers know about both a model and the `current_user`, so you can
 customize serialization based upon whether a user is authorized to see the
 content.
 
-In short, **serializers replaces hash-driven development with object-oriented
+In short, **serializers replace hash-driven development with object-oriented
 development.**
 
 # Installing Serializers
 
-For now, the easiest way to install `ActiveModel::Serializers` is to add this
-to your `Gemfile`:
+The easiest way to install `ActiveModel::Serializers` is to add it to your
+`Gemfile`:
 
 ```ruby
-gem "active_model_serializers", :github => "rails-api/active_model_serializers"
+gem "active_model_serializers", "~> 0.7.0"
 ```
 
 Then, install it on the command line:
@@ -48,10 +48,14 @@ $ rails g serializer post
 ### Support for PORO's and other ORM's.
 
 Currently `ActiveModel::Serializers` adds serialization support to all models
-that descend from `ActiveRecord`. If you are using another ORM or if you are
-using objects that are `ActiveModel` compliant, but do not descend from
-`ActiveRecord`. You must add an include statement for
-`ActiveModel::SerializerSupport`.
+that descend from `ActiveRecord` or include `Mongoid::Document`. If you are
+using another ORM, or if you are using objects that are `ActiveModel`
+compliant but do not descend from `ActiveRecord` or include
+`Mongoid::Document`, you must add an include statement for
+`ActiveModel::SerializerSupport` to make models serializable. If you
+also want to make collections serializable, you should include
+`ActiveModel::ArraySerializationSupport` into your ORM's
+relation/criteria class.
 
 # ActiveModel::Serializer
 
@@ -135,13 +139,13 @@ render :json => @posts, :root => "some_posts"
 ```
 
 You may disable the root element for arrays at the top level, which will result in
-more concise json. To disable the root element for arrays, you have 3 options:
+more concise json. To disable the root element for arrays, you have 4 options:
 
 #### 1. Disable root globally for in `ArraySerializer`. In an initializer:
 
 ```ruby
 ActiveSupport.on_load(:active_model_serializers) do
-  self.root = false
+  ActiveModel::ArraySerializer.root = false
 end
 ```
 
@@ -176,6 +180,19 @@ To specify a custom serializer for the items within an array:
 
 ```ruby
 render :json => @posts, :each_serializer => FancyPostSerializer
+```
+#### 4. Define default_serializer_options in your controller
+
+If you define `default_serializer_options` method in your controller,
+all serializers in actions of this controller and it's children will use them.
+One of the options may be `root: false`
+
+```ruby
+def default_serializer_options
+  {
+    root: false
+  }
+end
 ```
 
 ## Getting the old version
@@ -219,22 +236,36 @@ end
 Within a serializer's methods, you can access the object being
 serialized as `object`.
 
-You can also access the `scope` method, which provides an
-authorization context to your serializer. By default, scope
+You can also access the `current_user` method, which provides an
+authorization context to your serializer. By default, the context
 is the current user of your application, but this
 [can be customized](#customizing-scope).
 
 Serializers will check for the presence of a method named
 `include_[ATTRIBUTE]?` to determine whether a particular attribute should be
 included in the output. This is typically used to customize output
-based on `scope`. For example:
+based on `current_user`. For example:
 
 ```ruby
 class PostSerializer < ActiveModel::Serializer
   attributes :id, :title, :body, :author
 
   def include_author?
-    scope.admin?
+    current_user.admin?
+  end
+end
+```
+
+The type of a computed attribute (like :full_name above) is not easily
+calculated without some sophisticated static code analysis. To specify the
+type of a computed attribute:
+
+```ruby
+class PersonSerializer < ActiveModel::Serializer
+  attributes :first_name, :last_name, {:full_name => :string}
+
+  def full_name
+    "#{object.first_name} #{object.last_name}"
   end
 end
 ```
@@ -298,7 +329,7 @@ class PersonSerializer < ActiveModel::Serializer
 
   def attributes
     hash = super
-    if scope.admin?
+    if current_user.admin?
       hash["ssn"] = object.ssn
       hash["secret"] = object.mothers_maiden_name
     end
@@ -326,7 +357,7 @@ class PostSerializer < ActiveModel::Serializer
 
   # only let the user see comments he created.
   def comments
-    object.comments.where(:created_by => scope)
+    object.comments.where(:created_by => current_user)
   end
 end
 ```
@@ -368,7 +399,7 @@ class PostSerializer < ActiveModel::Serializer
   has_many :comments
 
   def include_associations!
-    include! :author if scope.admin?
+    include! :author if current_user.admin?
     include! :comments unless object.comments_disabled?
   end
 end
@@ -380,6 +411,8 @@ You may also use the `:serializer` option to specify a custom serializer class a
   has_many :comments, :serializer => CommentShortSerializer
   has_one :reviewer, :polymorphic => true
 ```
+
+Serializers are only concerned with multiplicity, and not ownership. `belongs_to` ActiveRecord associations can be included using `has_one` in your serializer.
 
 ## Embedding Associations
 
@@ -522,6 +555,34 @@ This would generate JSON that would look like this:
 }
 ```
 
+You can also specify a different attribute to use rather than the ID of the
+objects:
+
+```ruby
+class PostSerializer < ActiveModel::Serializer
+  embed :ids, :include => true
+
+  attributes :id, :title, :body
+  has_many :comments, :embed_key => :external_id
+end
+```
+
+This would generate JSON that would look like this:
+
+```json
+{
+  "post": {
+    "id": 1,
+    "title": "New post",
+    "body": "A body!",
+    "comment_ids": [ "COMM001" ]
+  },
+  "comments": [
+    { "id": 1, "external_id": "COMM001", "body": "what a dumb post" }
+  ]
+}
+```
+
 **NOTE**: The `embed :ids` mechanism is primary useful for clients that process
 data in bulk and load it into a local store. For these clients, the ability to
 easily see all of the data per type, rather than having to recursively scan the
@@ -532,7 +593,7 @@ Ajax requests, you probably just want to use the default embedded behavior.
 
 ## Customizing Scope
 
-In a serializer, `scope` is the current authorization scope which the controller
+In a serializer, `current_user` is the current authorization scope which the controller
 provides to the serializer when you call `render :json`. By default, this is
 `current_user`, but can be customized in your controller by calling
 `serialization_scope`:
@@ -542,3 +603,44 @@ class ApplicationController < ActionController::Base
   serialization_scope :current_admin
 end
 ```
+
+The above example will also change the scope name from `current_user` to
+`current_admin`.
+
+Please note that, until now, `serialization_scope` doesn't accept a second
+object with options for specifying which actions should or should not take a
+given scope in consideration.
+
+To be clear, it's not possible, yet, to do something like this:
+
+```ruby
+class SomeController < ApplicationController
+  serialization_scope :current_admin, :except => [:index, :show]
+end
+```
+
+So, in order to have a fine grained control of what each action should take in
+consideration for its scope, you may use something like this:
+
+```ruby
+class CitiesController < ApplicationController
+  serialization_scope nil
+
+  def index
+    @cities = City.all
+
+    render :json => @cities, :each_serializer => CitySerializer
+  end
+
+  def show
+    @city = City.find(params[:id])
+
+    render :json => @city, :scope => current_admin, :scope_name => :current_admin
+  end
+end
+```
+
+Assuming that the `current_admin` method needs to make a query in the database
+for the current user, the advantage of this approach is that, by setting
+`serialization_scope` to `nil`, the `index` action no longer will need to make
+that query, only the `show` action will.

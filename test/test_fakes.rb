@@ -54,6 +54,30 @@ class UserSerializer < ActiveModel::Serializer
   end
 end
 
+class UserAttributesWithKeySerializer < ActiveModel::Serializer
+  attributes :first_name => :f_name, :last_name => :l_name
+
+  def serializable_hash
+    attributes.merge(:ok => true).merge(options[:scope])
+  end
+end
+
+class UserAttributesWithSomeKeySerializer < ActiveModel::Serializer
+  attributes :first_name, :last_name => :l_name
+
+  def serializable_hash
+    attributes.merge(:ok => true).merge(options[:scope])
+  end
+end
+
+class UserAttributesWithUnsymbolizableKeySerializer < ActiveModel::Serializer
+  attributes :first_name, :last_name => :"last-name"
+
+  def serializable_hash
+    attributes.merge(:ok => true).merge(options[:scope])
+  end
+end
+
 class DefaultUserSerializer < ActiveModel::Serializer
   attributes :first_name, :last_name
 end
@@ -128,6 +152,10 @@ end
 
 class BlogSerializer < ActiveModel::Serializer
   has_one :author, :serializer => AuthorSerializer
+end
+
+class BlogWithRootSerializer < BlogSerializer
+  root true
 end
 
 class CustomPostSerializer < ActiveModel::Serializer

@@ -15,13 +15,23 @@ if defined?(Rails)
 
         Rails::Generators.configure!(app.config.generators)
         Rails::Generators.hidden_namespaces.uniq!
-        require "generators/resource_override"
+        require_relative "generators/resource_override"
       end
 
       initializer "include_routes.active_model_serializer" do |app|
         ActiveSupport.on_load(:active_model_serializers) do
-          include app.routes.url_helpers
+          include AbstractController::UrlFor
+          extend ::AbstractController::Railties::RoutesHelpers.with(app.routes)
+          include app.routes.mounted_helpers
         end
+      end
+
+      initializer "caching.active_model_serializer" do |app|
+        ActiveModel::Serializer.perform_caching = app.config.action_controller.perform_caching
+        ActiveModel::ArraySerializer.perform_caching = app.config.action_controller.perform_caching
+
+        ActiveModel::Serializer.cache = Rails.cache
+        ActiveModel::ArraySerializer.cache = Rails.cache
       end
     end
   end
@@ -33,14 +43,12 @@ module ActiveModel::SerializerSupport
   module ClassMethods #:nodoc:
     if "".respond_to?(:safe_constantize)
       def active_model_serializer
-        @active_model_serializer ||= "#{self.name}Serializer".safe_constantize
+        "#{self.name}Serializer".safe_constantize
       end
     else
       def active_model_serializer
-        return @active_model_serializer if defined?(@active_model_serializer)
-
         begin
-          @active_model_serializer = "#{self.name}Serializer".constantize
+          "#{self.name}Serializer".constantize
         rescue NameError => e
           raise unless e.message =~ /uninitialized constant/
         end
@@ -56,10 +64,6 @@ module ActiveModel::SerializerSupport
   alias :read_attribute_for_serialization :send
 end
 
-ActiveSupport.on_load(:active_record) do
-  include ActiveModel::SerializerSupport
-end
-
 module ActiveModel::ArraySerializerSupport
   def active_model_serializer
     ActiveModel::ArraySerializer
@@ -69,8 +73,14 @@ end
 Array.send(:include, ActiveModel::ArraySerializerSupport)
 Set.send(:include, ActiveModel::ArraySerializerSupport)
 
-ActiveSupport.on_load(:active_record) do
-  ActiveRecord::Relation.send(:include, ActiveModel::ArraySerializerSupport)
+{
+  :active_record => 'ActiveRecord::Relation',
+  :mongoid => 'Mongoid::Criteria'
+}.each do |orm, rel_class|
+  ActiveSupport.on_load(orm) do
+    include ActiveModel::SerializerSupport
+    rel_class.constantize.send(:include, ActiveModel::ArraySerializerSupport)
+  end
 end
 
 begin

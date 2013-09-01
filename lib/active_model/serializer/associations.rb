@@ -17,6 +17,14 @@ module ActiveModel
             end
 
             self.options = class_options
+
+            # cache the root so we can reuse it without falling back on a per-instance basis
+            begin
+              self.options[:root] ||= self.new(name, nil).root
+            rescue
+              # this could fail if it needs a valid source, for example a polymorphic association
+            end
+
           end
         end
 
@@ -39,7 +47,8 @@ module ActiveModel
         end
 
         def target_serializer
-          option(:serializer)
+          serializer = option(:serializer)
+          serializer.is_a?(String) ? serializer.constantize : serializer
         end
 
         def source_serializer
@@ -63,11 +72,11 @@ module ActiveModel
         end
 
         def embed_ids?
-          option(:embed, source_serializer._embed) == :ids
+          [:id, :ids].include? option(:embed, source_serializer._embed)
         end
 
         def embed_objects?
-          option(:embed, source_serializer._embed) == :objects
+          [:object, :objects].include? option(:embed, source_serializer._embed)
         end
 
         def embed_in_root?
@@ -105,6 +114,14 @@ module ActiveModel
           end
         end
 
+        def embed_key
+          if key = option(:embed_key)
+            key
+          else
+            :id
+          end
+        end
+
         def serialize
           associated_object.map do |item|
             find_serializable(item).serializable_hash
@@ -118,15 +135,12 @@ module ActiveModel
         end
 
         def serialize_ids
-          # Use pluck or select_columns if available
-          # return collection.ids if collection.respond_to?(:ids)
-          ids_key = "#{key.to_s.singularize}_ids"
-
-          if !(option(:include) || embed_ids_old_style) && source_serializer.object.respond_to?(ids_key)
-            source_serializer.object.send(ids_key)
+          ids_key = "#{@name.to_s.singularize}_ids".to_sym
+          if !option(:embed_key) && !source_serializer.respond_to?(@name.to_s) && source_serializer.object.respond_to?(ids_key)
+            source_serializer.object.read_attribute_for_serialization(ids_key)
           else
             associated_object.map do |item|
-              item.read_attribute_for_serialization(:id)
+              item.read_attribute_for_serialization(embed_key)
             end
           end
         end
@@ -165,6 +179,14 @@ module ActiveModel
           end
         end
 
+        def embed_key
+          if key = option(:embed_key)
+            key
+          else
+            :id
+          end
+        end
+
         def polymorphic_key
           associated_object.class.to_s.demodulize.underscore.to_sym
         end
@@ -189,19 +211,21 @@ module ActiveModel
         end
 
         def serialize_ids
+          id_key = "#{@name}_id".to_sym
+
           if polymorphic?
             if associated_object
               {
                 :type => polymorphic_key,
-                :id => associated_object.read_attribute_for_serialization(:id)
+                :id => associated_object.read_attribute_for_serialization(embed_key)
               }
             else
               nil
             end
-          elsif source_serializer.object.respond_to?("#{name}_id")
-            source_serializer.object.send("#{name}_id")
+          elsif !option(:embed_key) && !source_serializer.respond_to?(@name.to_s) && source_serializer.object.respond_to?(id_key)
+            source_serializer.object.read_attribute_for_serialization(id_key)
           elsif associated_object
-            associated_object.read_attribute_for_serialization(:id)
+            associated_object.read_attribute_for_serialization(embed_key)
           else
             nil
           end

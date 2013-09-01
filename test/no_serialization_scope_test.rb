@@ -28,7 +28,7 @@ class NoSerializationScopeTest < ActionController::TestCase
   tests NoSerializationScopeController
 
   def test_disabled_serialization_scope
-    get :index
+    get :index, :format => :json
     assert_equal '{"scope":null}', @response.body
   end
 end

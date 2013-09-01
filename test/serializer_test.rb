@@ -29,6 +29,39 @@ class SerializerTest < ActiveModel::TestCase
     }, hash)
   end
 
+  def test_attributes_method_specifying_keys
+    user = User.new
+    user_serializer = UserAttributesWithKeySerializer.new(user, :scope => {})
+
+    hash = user_serializer.as_json
+
+    assert_equal({
+      :user_attributes_with_key => { :f_name => "Jose", :l_name => "Valim", :ok => true }
+    }, hash)
+  end
+
+  def test_attributes_method_specifying_some_keys
+    user = User.new
+    user_serializer = UserAttributesWithSomeKeySerializer.new(user, :scope => {})
+
+    hash = user_serializer.as_json
+
+    assert_equal({
+      :user_attributes_with_some_key => { :first_name => "Jose", :l_name => "Valim", :ok => true }
+    }, hash)
+  end
+
+  def test_attributes_method_with_unsymbolizable_key
+    user = User.new
+    user_serializer = UserAttributesWithUnsymbolizableKeySerializer.new(user, :scope => {})
+
+    hash = user_serializer.as_json
+
+    assert_equal({
+      :user_attributes_with_unsymbolizable_key => { :first_name => "Jose", :"last-name" => "Valim", :ok => true }
+    }, hash)
+  end
+
   def test_attribute_method_with_name_as_serializer_prefix
     object = SomeObject.new("something")
     object_serializer = SomeSerializer.new(object, {})
@@ -254,6 +287,28 @@ class SerializerTest < ActiveModel::TestCase
     assert_equal({ :my_blog => { :author => nil } }, serializer.new(blog, :scope => user).as_json)
   end
 
+  def test_nil_root_object
+    user = User.new
+    blog = nil
+
+    serializer = Class.new(BlogSerializer) do
+      root false
+    end
+
+    assert_equal(nil, serializer.new(blog, :scope => user).as_json)
+  end
+
+  def test_custom_root_with_nil_root_object
+    user = User.new
+    blog = nil
+
+    serializer = Class.new(BlogSerializer) do
+      root :my_blog
+    end
+
+    assert_equal({ :my_blog => nil }, serializer.new(blog, :scope => user).as_json)
+  end
+
   def test_false_root
     user = User.new
     blog = Blog.new
@@ -272,6 +327,33 @@ class SerializerTest < ActiveModel::TestCase
     # test inherited false root
     serializer = Class.new(serializer)
     assert_equal({ :author => nil }, serializer.new(blog, :scope => user).as_json)
+  end
+
+  def test_true_root
+    blog = Blog.new
+
+    assert_equal({
+      :blog_with_root => {
+        :author => nil,
+      }
+    }, BlogWithRootSerializer.new(blog).as_json)
+  end
+
+  def test_root_false_on_load_active_model_serializers
+    begin
+      ActiveSupport.on_load(:active_model_serializers) do
+        self.root = false
+      end
+
+      blog = Blog.new
+      serializer = BlogSerializer.new(blog)
+
+      assert_equal({ :author => nil }, serializer.as_json)
+    ensure
+      ActiveSupport.on_load(:active_model_serializers) do
+        self.root = nil
+      end
+    end
   end
 
   def test_embed_ids
@@ -343,6 +425,33 @@ class SerializerTest < ActiveModel::TestCase
       ],
       :authors => [{ :first_name => "Jose", :last_name => "Valim" }]
     }, serializer.as_json)
+  end
+
+  def test_methods_take_priority_over_associations
+    post_serializer = Class.new(ActiveModel::Serializer) do
+      attributes :title
+      has_many :comments
+      embed :ids
+
+      def comments
+        object.comments[0,1]
+      end
+    end
+
+    post = Post.new(:title => "My Post")
+    comments = [Comment.new(:title => "Comment1", :id => 1), Comment.new(:title => "Comment2", :id => 2)]
+    post.comments = comments
+
+    post.class_eval do
+      define_method :comment_ids, lambda {
+        self.comments.map { |c| c.read_attribute_for_serialization(:id) }
+      }
+    end
+    json = post_serializer.new(post).as_json
+    assert_equal({
+      :title => "My Post",
+      :comment_ids => [1]
+    }, json)
   end
 
   def test_embed_objects
@@ -473,26 +582,6 @@ class SerializerTest < ActiveModel::TestCase
     }, serializer.as_json)
   end
 
-  def test_attribute_block
-    serializer_class = Class.new(ActiveModel::Serializer) do
-      root :user
-
-      attribute :fullName do
-        "#{@attributes[:first_name]} #{@attributes[:last_name]}"
-      end
-      attribute :password
-    end
-
-    serializer = serializer_class.new(User.new)
-
-    assert_equal({
-      :user => {
-        :fullName => "Jose Valim",
-        :password => "oh noes yugive my password"
-      }
-    }, serializer.as_json)
-  end
-
   def setup_model
     Class.new do
       class << self
@@ -522,16 +611,17 @@ class SerializerTest < ActiveModel::TestCase
 
       # Computed attributes (not real columns or associations).
       def can_edit; end
+      def can_view; end
       def drafts; end
 
-      attributes :name, :age, :can_edit
+      attributes :name, :age, {:can_edit => :boolean}, :can_view
       has_many :posts, :serializer => Class.new
       has_many :drafts, :serializer => Class.new
       has_one :parent, :serializer => Class.new
     end
 
     assert_equal serializer.schema, {
-      :attributes => { :name => :string, :age => :integer, :can_edit => nil },
+      :attributes => { :name => :string, :age => :integer, :can_edit => :boolean, :can_view => nil },
       :associations => {
         :posts => { :has_many => :posts },
         :drafts => nil,
@@ -1268,5 +1358,95 @@ class SerializerTest < ActiveModel::TestCase
         { :name => "Sinatra" },
       ]
     }, actual)
+  end
+
+  def test_inheritance_does_not_used_cached_attributes
+    parent = Class.new(ActiveModel::Serializer) do
+      attributes :title
+    end
+
+    child = Class.new(parent) do
+      attributes :body
+    end
+
+    data_class = Class.new do
+      attr_accessor :title, :body
+    end
+
+    item = data_class.new
+    item.title = "title"
+    item.body = "body"
+
+    2.times do
+      assert_equal({:title => "title"},
+                   parent.new(item).attributes)
+      assert_equal({:body => "body", :title => "title"},
+                   child.new(item).attributes)
+    end
+
+  end
+
+  def test_scope_name_method
+    serializer = Class.new(ActiveModel::Serializer) do
+      def has_permission?
+        current_user.super_user?
+      end
+    end
+
+    user = User.new
+    user.superuser = true
+    post = Post.new(:title => 'Foo')
+
+    a_serializer = serializer.new(post, :scope => user, :scope_name => :current_user)
+    assert a_serializer.has_permission?
+  end
+
+  def test_only_option_filters_attributes_and_associations
+    post = Post.new(:title => "New Post", :body => "Body of new post")
+    comments = [Comment.new(:title => "Comment1")]
+    post.comments = comments
+
+    post_serializer = PostSerializer.new(post, :only => :title)
+
+    assert_equal({
+      :post => {
+        :title => "New Post"
+      }
+    }, post_serializer.as_json)
+  end
+
+  def test_except_option_filters_attributes_and_associations
+    post = Post.new(:title => "New Post", :body => "Body of new post")
+    comments = [Comment.new(:title => "Comment1")]
+    post.comments = comments
+
+    post_serializer = PostSerializer.new(post, :except => [:body, :comments])
+
+    assert_equal({
+      :post => {
+        :title => "New Post"
+      }
+    }, post_serializer.as_json)
+  end
+
+  def test_only_option_takes_precedence_over_custom_defined_include_methods
+    user = User.new
+
+    post = Post.new(:title => "New Post", :body => "Body of new post", :author => "Sausage King")
+    comments = [Comment.new(:title => "Comment")]
+    post.comments = comments
+
+    post_serializer = PostWithMultipleConditionalsSerializer.new(post, :scope => user, :only => :title)
+
+    # comments enabled
+    post.comments_disabled = false
+    # superuser - should see author
+    user.superuser = true
+
+    assert_equal({
+      :post => {
+        :title => "New Post"
+      }
+    }, post_serializer.as_json)
   end
 end
