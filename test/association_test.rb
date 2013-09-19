@@ -303,6 +303,27 @@ class AssociationTest < ActiveModel::TestCase
       ActiveModel::Serializer::Associations::HasMany.embed_ids_old_style = false
     end
 
+    def test_embed_ids_for_has_many_associations_old_style_is_overridable_in_serializer_class
+      ActiveModel::Serializer::Associations::HasMany.embed_ids_old_style = true
+
+      @post_serializer_class.class_eval do
+        embed_ids_old_style false
+        embed :ids
+
+        has_many :comments, :embed => :ids
+      end
+
+      include_bare! :comments
+
+      assert_equal({
+        :comment_ids => [ 1 ]
+      }, @hash)
+
+      assert_equal({}, @root_hash)
+    ensure
+      ActiveModel::Serializer::Associations::HasMany.embed_ids_old_style = false
+    end
+
     def test_embed_false_for_has_many_associations
       @post_serializer_class.class_eval do
         has_many :comments, :embed => false

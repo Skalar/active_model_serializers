@@ -63,6 +63,7 @@ module ActiveModel
 
     class_attribute :_root
     class_attribute :_embed
+    class_attribute :_embed_ids_old_style
     self._embed = :objects
     class_attribute :_root_embed
 
@@ -245,6 +246,10 @@ module ActiveModel
       def embed(type, options={})
         self._embed = type
         self._root_embed = true if options[:include]
+      end
+
+      def embed_ids_old_style(bool)
+        self._embed_ids_old_style = !!bool
       end
 
       # Defines the root used on serialization. If false, disables the root.

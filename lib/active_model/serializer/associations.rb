@@ -107,11 +107,18 @@ module ActiveModel
         def key
           if key = option(:key)
             key
-          elsif embed_ids? && !embed_ids_old_style
+          elsif embed_ids? && suffix_key_with_ids?
             "#{@name.to_s.singularize}_ids".to_sym
           else
             @name
           end
+        end
+
+        def suffix_key_with_ids?
+          default = source_serializer._embed_ids_old_style # Read from serializer class
+          default = embed_ids_old_style if default.nil? # Read from config set on HasMany class
+
+          !option(:embed_ids_old_style, default) # read from options sent when defining the has_many, or use default from above
         end
 
         def embed_key
